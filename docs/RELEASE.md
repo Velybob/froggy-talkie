@@ -1,8 +1,9 @@
 # Подготовка и распространение
 
 Документ проверен по официальной документации Apple 6 ноября 2026 года.
+Текущий предварительный выпуск: **v0.5.0-beta.2**, версия 0.5.0, сборка 17.
 Публичный репозиторий: [Velybob/froggy-talkie](https://github.com/Velybob/froggy-talkie).
-[v0.5.0-beta.1](https://github.com/Velybob/froggy-talkie/releases/tag/v0.5.0-beta.1)
+[v0.5.0-beta.2](https://github.com/Velybob/froggy-talkie/releases/tag/v0.5.0-beta.2)
 распространяется как prerelease для проверки на другом Mac. Сборка `preview`
 подписана ad-hoc и не нотарифицирована.
 

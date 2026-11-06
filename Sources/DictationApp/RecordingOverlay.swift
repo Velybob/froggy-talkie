@@ -7,6 +7,7 @@ struct RecordingOverlayState {
     var title = "Froggy Talkie"
     var message = ""
     var recording = false
+    var canFinish = false
     var elapsed = "00:00"
     var levels = RecordingLevel().history
     var cancellable = false
@@ -16,8 +17,12 @@ struct RecordingOverlayState {
 
 struct RecordingOverlayView: View {
     static let size = NSSize(width: 184, height: 36)
+    static func size(for state: RecordingOverlayState) -> NSSize {
+        NSSize(width: state.recording && state.canFinish ? 290 : size.width, height: size.height)
+    }
     var state: RecordingOverlayState
     var cancel: () -> Void = {}
+    var finish: () -> Void = {}
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorSchemeContrast) private var contrast
@@ -49,6 +54,15 @@ struct RecordingOverlayView: View {
                         .monospacedDigit().fixedSize()
                         .accessibilityLabel("Длительность записи")
                         .accessibilityValue(state.elapsed)
+                    if state.canFinish {
+                        Button("Завершить", systemImage: "stop.fill", action: finish)
+                            .font(.system(size: 11, weight: .semibold))
+                            .buttonStyle(.plain)
+                            .foregroundStyle(palette.accent)
+                            .fixedSize()
+                            .help("Завершить и распознать")
+                            .accessibilityLabel("Завершить и распознать")
+                    }
                     cancelButton
                 }
             } else {
@@ -64,7 +78,7 @@ struct RecordingOverlayView: View {
             }
         }
         .padding(.horizontal, 12)
-        .frame(width: Self.size.width, height: Self.size.height)
+        .frame(width: Self.size(for: state).width, height: Self.size(for: state).height)
         .foregroundStyle(palette.text)
         .background(state.error ? palette.errorSurface : palette.editor, in: Capsule())
         .overlay(Capsule().stroke(contrast == .increased ? palette.secondary : palette.border, lineWidth: 1))
@@ -80,6 +94,7 @@ struct RecordingOverlayView: View {
         .buttonStyle(.plain)
         .foregroundStyle(palette.secondary)
         .accessibilityLabel(state.cancellable ? "Отменить диктовку" : "Скрыть уведомление")
+        .help(state.cancellable ? "Отменить без распознавания" : "Скрыть уведомление")
     }
 }
 
@@ -94,13 +109,14 @@ final class RecordingOverlay {
     private final class Content: ObservableObject {
         @Published var state = RecordingOverlayState()
         var cancel: () -> Void = {}
+        var finish: () -> Void = {}
     }
 
     private struct ThemedContent: View {
         @ObservedObject var content: Content
 
         var body: some View {
-            RecordingOverlayView(state: content.state, cancel: content.cancel)
+            RecordingOverlayView(state: content.state, cancel: content.cancel, finish: content.finish)
         }
     }
 
@@ -121,11 +137,13 @@ final class RecordingOverlay {
         panel.contentView = NSHostingView(rootView: ThemedContent(content: content))
     }
 
-    func showRecording(elapsed: String, levels: [Double], hint: String, cancel: @escaping () -> Void) {
+    func showRecording(elapsed: String, levels: [Double], hint: String,
+                       finish: (() -> Void)? = nil, cancel: @escaping () -> Void) {
         dismissTask?.cancel()
         dismissTask = nil
         content.cancel = cancel
-        content.state = RecordingOverlayState(message: hint, recording: true,
+        content.finish = finish ?? {}
+        content.state = RecordingOverlayState(message: hint, recording: true, canFinish: finish != nil,
             elapsed: elapsed, levels: levels, cancellable: true)
         present()
     }
@@ -135,6 +153,7 @@ final class RecordingOverlay {
         dismissTask?.cancel()
         dismissTask = nil
         content.cancel = cancel ?? { [weak self] in self?.hide() }
+        content.finish = {}
         content.state = RecordingOverlayState(title: title, message: message,
             cancellable: cancel != nil, warning: warning, error: error)
         present()
@@ -148,11 +167,16 @@ final class RecordingOverlay {
     }
 
     private func present() {
+        let size = RecordingOverlayView.size(for: content.state)
+        if panel.frame.size != size {
+            let origin = NSPoint(x: panel.frame.midX - size.width / 2, y: panel.frame.minY)
+            panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        }
         guard !panel.isVisible else { return }
         let mouse = NSEvent.mouseLocation
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(mouse) }) ?? NSScreen.main {
             let area = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: area.midX - Self.size.width / 2, y: area.minY + 8))
+            panel.setFrameOrigin(NSPoint(x: area.midX - size.width / 2, y: area.minY + 8))
         }
         panel.orderFrontRegardless()
     }
@@ -162,6 +186,7 @@ final class RecordingOverlay {
         dismissTask = nil
         panel.orderOut(nil)
         content.cancel = {}
+        content.finish = {}
         content.state = RecordingOverlayState()
     }
 }

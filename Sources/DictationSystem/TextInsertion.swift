@@ -24,11 +24,12 @@ public enum InsertionGuard {
 public final class TextInsertion {
     public struct Target {
         fileprivate let pid: pid_t
-        fileprivate let element: AXUIElement
+        fileprivate let element: AXFocusElement
         fileprivate let selection: TextSelection?
         public let applicationName: String
     }
     public enum Result { case sent(String), retained(String) }
+    private let focus = AXTextFocusAccess()
     private var restoreTask: Task<Void, Never>?
     private var pendingRestore: (PasteboardSnapshot, Int)?
 
@@ -40,21 +41,28 @@ public final class TextInsertion {
         _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
 
-    public func captureTarget() throws -> Target {
+    public func captureTarget(expectedPID: pid_t) async throws -> Target {
         guard isTrusted else { throw Failure("Для вставки разреши «Универсальный доступ» в окне диктовки.") }
         guard let app = NSWorkspace.shared.frontmostApplication,
-              app.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+              app.processIdentifier == expectedPID,
+              expectedPID != ProcessInfo.processInfo.processIdentifier else {
             throw Failure("Перейди в редактор и поставь курсор в текстовое поле.")
         }
-        guard let element = focusedElement(pid: app.processIdentifier) else {
-            throw Failure("Редактор не сообщает активное поле. Текст останется в окне диктовки.")
+        let element: AXFocusElement
+        do {
+            element = try await TextFocusResolver(access: focus).resolve(pid: expectedPID)
+        } catch TextFocusFailure.secure {
+            throw Failure("Вставка в поле пароля отключена. Текст останется в окне диктовки.")
+        } catch TextFocusFailure.changedApplication {
+            throw Failure("Активное приложение изменилось. Текст останется в окне диктовки.")
+        } catch TextFocusFailure.unavailable {
+            throw Failure("Не удалось определить поле в \(app.localizedName ?? "редакторе"). Поставь курсор в поле и повтори хоткей; результат можно скопировать из окна.")
         }
-        guard !isSecure(element) else { throw Failure("Вставка в поле пароля отключена. Текст останется в окне диктовки.") }
-        let selection = selectedRange(element)
-        guard selection != nil || isEditableTextField(element) else {
-            throw Failure("Не удалось подтвердить текстовое поле. Текст останется в окне диктовки.")
+        try Task.checkCancellation()
+        guard isTrusted, focus.frontmostPID == expectedPID else {
+            throw Failure("Фокус или разрешение на вставку изменилось. Текст останется в окне диктовки.")
         }
-        return Target(pid: app.processIdentifier, element: element, selection: selection,
+        return Target(pid: expectedPID, element: element, selection: focus.selectedRange(element),
             applicationName: app.localizedName ?? "редактор")
     }
 
@@ -116,50 +124,11 @@ public final class TextInsertion {
 
     private func targetIsUnchanged(_ target: Target) -> Bool {
         guard let app = NSWorkspace.shared.frontmostApplication,
-              let current = focusedElement(pid: app.processIdentifier) else { return false }
+              let current = try? TextFocusResolver(access: focus).current(pid: app.processIdentifier) else { return false }
         return InsertionGuard.permits(originalPID: target.pid, currentPID: app.processIdentifier,
-            sameElement: CFEqual(target.element, current), originalSelection: target.selection,
-            currentSelection: selectedRange(current), secure: isSecure(current),
-            editableTextField: isEditableTextField(current))
-    }
-
-    private func focusedElement(pid: pid_t) -> AXUIElement? {
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.25)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &value) == .success,
-              let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
-        let element = value as! AXUIElement
-        AXUIElementSetMessagingTimeout(element, 0.25)
-        return element
-    }
-
-    private func selectedRange(_ element: AXUIElement) -> TextSelection? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
-              let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cfRange else { return nil }
-        var range = CFRange()
-        guard AXValueGetValue(axValue, .cfRange, &range), range.location >= 0, range.length >= 0 else { return nil }
-        return TextSelection(location: range.location, length: range.length)
-    }
-
-    private func isSecure(_ element: AXUIElement) -> Bool {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &value) == .success else { return false }
-        return (value as? String) == (kAXSecureTextFieldSubrole as String)
-    }
-
-    private func isEditableTextField(_ element: AXUIElement) -> Bool {
-        var roleValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success,
-              let role = roleValue as? String,
-              [kAXTextFieldRole, kAXTextAreaRole, kAXComboBoxRole].contains(role) else { return false }
-        var enabledValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXEnabledAttribute as CFString, &enabledValue) == .success,
-           let enabled = enabledValue as? Bool, !enabled { return false }
-        return true
+            sameElement: target.element == current, originalSelection: target.selection,
+            currentSelection: focus.selectedRange(current), secure: focus.isSecure(current),
+            editableTextField: focus.isEditableTextField(current))
     }
 
     private struct Failure: LocalizedError {

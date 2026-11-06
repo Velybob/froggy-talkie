@@ -15,6 +15,7 @@ struct LocalDictationApp: App {
             DictationView(model: model)
                 .frame(minWidth: 440, minHeight: 440)
                 .onAppear { delegate.model = model }
+                .task { await model.requestInitialMicrophonePermission() }
         }
         .defaultSize(width: 500, height: 492)
         .windowResizability(.contentMinSize)
@@ -62,7 +63,7 @@ private struct DictationView: View {
             transcript: $model.transcript,
             state: DictationViewState(
                 status: model.status, statusTone: model.statusTone, shortcut: model.shortcut, hotKeyError: model.hotKeyError,
-                isRecording: model.isRecording, isWorking: model.isWorking,
+                isRecording: model.isRecording, manualRecording: model.isManualRecording, isWorking: model.isWorking,
                 isCancelling: model.isCancelling, canRecord: model.canRecord,
                 modelReady: model.ready, insertionAllowed: model.insertionAllowed,
                 recordingTime: model.recordingTime, microphoneLevel: model.microphoneLevel),
@@ -163,11 +164,13 @@ final class DictationModel: ObservableObject {
     private var insertionTarget: TextInsertion.Target?
     private var insertionNotice: String?
     private var globalOperation = false
+    private let microphonePermission = MicrophonePermission()
     private let insertion = TextInsertion()
     private let overlay = RecordingOverlay()
     private var recordingTicker: Task<Void, Never>?
 
     var isRecording: Bool { state == .recording }
+    var isManualRecording: Bool { isRecording && !globalOperation }
     var isCancelling: Bool { state == .cancelling }
     var isWorking: Bool { [.downloading, .loading, .processing, .cancelling].contains(state) }
     var isBusy: Bool { isWorking || isRecording }
@@ -191,6 +194,13 @@ final class DictationModel: ObservableObject {
     }
 
     func refreshInsertionPermission() { insertionAllowed = insertion.isTrusted }
+
+    func requestInitialMicrophonePermission() async {
+        let granted = await microphonePermission.requestIfNeeded()
+        guard !Task.isCancelled, !granted, !isBusy else { return }
+        status = "Микрофон отключён. Разреши доступ в настройках конфиденциальности macOS."
+        statusTone = .warning
+    }
 
     private func registerHotKey() {
         do {
@@ -242,16 +252,14 @@ final class DictationModel: ObservableObject {
         }
         do {
             guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
-                throw AppError.message("Сначала разреши микрофон кнопкой «Начать запись» в окне диктовки.")
+                throw AppError.message("Разреши микрофон в окне диктовки или в настройках конфиденциальности macOS.")
             }
             refreshInsertionPermission()
             insertionTarget = nil
             insertionNotice = nil
-            do { insertionTarget = try insertion.captureTarget() }
-            catch { insertionNotice = error.localizedDescription }
             holdSession = session
             globalOperation = true
-            beginRecording(session: session)
+            beginRecording(session: session, targetPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
         } catch {
             holdGate.cancelSession()
             status = error.localizedDescription
@@ -349,7 +357,7 @@ final class DictationModel: ObservableObject {
         beginRecording(session: nil)
     }
 
-    private func beginRecording(session: UUID?) {
+    private func beginRecording(session: UUID?, targetPID: pid_t? = nil) {
         state = .loading
         status = "Проверка доступа к микрофону…"
         if session != nil { overlay.show("Можно говорить после появления таймера.", title: "Подготовка", cancel: { [weak self] in self?.cancel() }) }
@@ -358,11 +366,24 @@ final class DictationModel: ObservableObject {
             if session != nil {
                 granted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
             } else {
-                granted = await AVCaptureDevice.requestAccess(for: .audio)
+                granted = await microphonePermission.requestIfNeeded()
             }
             do {
                 try Task.checkCancellation()
                 guard granted else { throw AppError.message("Нет доступа к микрофону. Разреши его в настройках конфиденциальности macOS.") }
+                if let session {
+                    guard holdSession == session else { throw CancellationError() }
+                    do {
+                        guard let targetPID else { throw AppError.message("Нет активного редактора. Текст останется в окне диктовки.") }
+                        insertionTarget = try await insertion.captureTarget(expectedPID: targetPID)
+                    } catch is CancellationError {
+                        throw CancellationError()
+                    } catch {
+                        insertionNotice = error.localizedDescription
+                    }
+                    try Task.checkCancellation()
+                    guard holdSession == session else { throw CancellationError() }
+                }
                 let url = FileManager.default.temporaryDirectory.appendingPathComponent("LocalDictation-\(UUID().uuidString).caf")
                 temporaryAudio = url
                 let capture = try AVAudioRecorder(url: url, settings: [
@@ -386,7 +407,7 @@ final class DictationModel: ObservableObject {
                 microphoneLevel = 0
                 recordingTime = "00:00"
                 state = .recording
-                status = session == nil ? "Идёт запись. Нажми «Завершить», когда закончишь." :
+                status = session == nil ? "Нажми «Завершить и распознать», чтобы получить текст в этом окне." :
                     (insertionTarget == nil ? "Идёт запись. Текст появится в окне диктовки: автовставка недоступна." : "Идёт запись. Отпусти \(shortcut.display) для вставки.")
                 startRecordingTicker()
                 updateRecordingTime()
@@ -424,8 +445,9 @@ final class DictationModel: ObservableObject {
         levelEnvelope.update(decibels: recorder.averagePower(forChannel: 0), elapsed: elapsed - lastMeterTime)
         lastMeterTime = elapsed
         microphoneLevel = levelEnvelope.value
-        let hint = globalOperation ? (insertionTarget == nil ? "Текст появится в окне диктовки" : "Отпусти \(shortcut.display) для вставки") : "Нажми «Завершить запись» в окне"
+        let hint = globalOperation ? (insertionTarget == nil ? "Текст появится в окне диктовки" : "Отпусти \(shortcut.display) для вставки") : "Заверши запись, чтобы получить текст"
         overlay.showRecording(elapsed: recordingTime, levels: levelEnvelope.history, hint: hint,
+            finish: globalOperation ? nil : { [weak self] in self?.stopRecording() },
             cancel: { [weak self] in self?.cancel() })
         if elapsed >= 180 || (recordingBeganAt?.duration(to: .now) ?? .zero) >= .seconds(180) { stopRecording() }
     }

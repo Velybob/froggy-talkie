@@ -34,6 +34,7 @@ struct DictationViewState {
     var shortcut = DictationShortcut.default
     var hotKeyError: String?
     var isRecording = false
+    var manualRecording = false
     var isWorking = false
     var isCancelling = false
     var canRecord = true
@@ -111,6 +112,11 @@ struct DictationScreen: View {
             status
                 .padding(.vertical, 12)
             controls
+            if !state.isBusy {
+                Text("При записи кнопкой текст появится в этом окне.")
+                    .font(.system(size: 11)).foregroundStyle(palette.secondary)
+                    .padding(.top, 8)
+            }
         }
         .padding(20)
         .foregroundStyle(palette.text)
@@ -160,25 +166,33 @@ struct DictationScreen: View {
 
     private var shortcut: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(spacing: 5) {
-                Text("Удерживайте").padding(.trailing, 3)
-                ForEach(state.shortcut.modifierSymbols, id: \.self) { key($0) }
-                key(state.shortcut.keyLabel)
+            if state.manualRecording {
+                Text("Запись с микрофона")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("Нажми «Завершить и распознать», чтобы получить текст.")
+                    .font(.system(size: 12)).foregroundStyle(palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(spacing: 5) {
+                    Text("Удерживайте").padding(.trailing, 3)
+                    ForEach(state.shortcut.modifierSymbols, id: \.self) { key($0) }
+                    key(state.shortcut.keyLabel)
+                }
+                .font(.system(size: 12))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Удерживайте \(state.shortcut.accessibilityLabel) в редакторе")
             }
-            .font(.system(size: 12))
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Удерживайте \(state.shortcut.accessibilityLabel) в редакторе")
 
             if let error = state.hotKeyError {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(palette.warning)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if state.insertionAllowed {
+            if state.insertionAllowed && !state.manualRecording {
                 Text(state.hotKeyError == nil ? "Отпустите — текст вставится у курсора." : "Выберите свободное сочетание в настройках.")
                     .font(.system(size: 12)).foregroundStyle(palette.secondary)
                     .help("В поддерживаемом текстовом поле. Если вставка недоступна, текст останется в этом окне.")
-            } else {
+            } else if !state.insertionAllowed {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("Для вставки нужен Универсальный доступ.")
                         .font(.system(size: 12)).foregroundStyle(palette.secondary)
@@ -291,16 +305,18 @@ struct DictationScreen: View {
                 Button("Настроить модель", systemImage: "slider.horizontal.3", action: settings)
                     .buttonStyle(DictationPrimaryButtonStyle())
             } else {
-                Button(state.isRecording ? "Завершить запись" : "Начать запись",
+                Button(state.isRecording ? "Завершить и распознать" : "Начать запись",
                        systemImage: state.isRecording ? "stop.fill" : "mic.fill",
                        action: state.isRecording ? stop : start)
                     .buttonStyle(DictationPrimaryButtonStyle(recording: state.isRecording))
                     .disabled(!state.isRecording && !state.canRecord)
+                    .help("Запись кнопкой выводит расшифровку в это окно. Для вставки в редактор используй хоткей.")
             }
             if state.isBusy {
                 Button("Отмена", action: cancel)
                     .buttonStyle(.borderless)
                     .disabled(state.isCancelling)
+                    .help("Отменить без распознавания")
             }
             Spacer(minLength: 0)
             Text("До 3 минут").font(.system(size: 11)).foregroundStyle(palette.secondary)

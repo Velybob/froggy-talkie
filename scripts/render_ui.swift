@@ -14,6 +14,7 @@ struct RenderDictationUI {
         let sample = "Давайте перенесём встречу на завтра.\nI’ll send you the updated notes this evening."
         let scenarios: [(String, DictationViewState, String)] = [
             ("empty", .init(), ""),
+            ("manual-recording", .init(isRecording: true, manualRecording: true, recordingTime: "00:12", microphoneLevel: 0.4), sample),
             ("text", .init(status: "Готово за 0.12 с · запись 8.4 с", statusTone: .success), sample),
             ("recording", .init(status: "Идёт запись. Нажми «Завершить», когда закончишь.",
                 isRecording: true, canRecord: false, recordingTime: "02:59", microphoneLevel: 0.72), sample),
@@ -33,7 +34,7 @@ struct RenderDictationUI {
                     .environment(\.colorScheme, scheme)
                 try render(view, size: NSSize(width: 500, height: 492), scheme: scheme,
                     to: directory.appendingPathComponent("\(theme)-\(name).png"))
-                if name == "error" || name == "recording" || name == "empty" {
+                if name == "error" || name == "recording" || name == "empty" || name == "manual-recording" {
                     try render(view, size: NSSize(width: 440, height: 440), scheme: scheme,
                         to: directory.appendingPathComponent("\(theme)-\(name)-minimum.png"))
                 }
@@ -65,6 +66,7 @@ struct RenderDictationUI {
                     to: directory.appendingPathComponent("\(theme)-model-\(cancelling ? "cancelling" : "downloading").png"))
             }
             let overlayStates: [(String, RecordingOverlayState)] = [
+                ("manual-recording", .init(recording: true, canFinish: true, elapsed: "00:12", levels: [0.1, 0.3, 0.6, 0.9, 0.6, 0.3, 0.1, 0.4, 0.6], cancellable: true)),
                 ("quiet", .init(recording: true, elapsed: "00:02", levels: Array(repeating: 0, count: 9), cancellable: true)),
                 ("voice", .init(recording: true, elapsed: "01:24", levels: [0.1, 0.28, 0.65, 0.95, 0.72, 0.36, 0.15, 0.45, 0.8], cancellable: true)),
                 ("peak", .init(recording: true, elapsed: "02:59", levels: Array(repeating: 1, count: 9), cancellable: true)),
@@ -77,7 +79,7 @@ struct RenderDictationUI {
             for (name, state) in overlayStates {
                 let overlay = RecordingOverlayView(state: state)
                     .environment(\.colorScheme, scheme)
-                try render(overlay, size: RecordingOverlayView.size, scheme: scheme,
+                try render(overlay, size: RecordingOverlayView.size(for: state), scheme: scheme,
                     to: directory.appendingPathComponent("\(theme)-overlay-\(name).png"))
             }
             let custom = DictationScreen(transcript: .constant(sample), state: .init(
@@ -90,7 +92,7 @@ struct RenderDictationUI {
             try render(shortcutEditor, size: nil, scheme: scheme,
                 to: directory.appendingPathComponent("\(theme)-shortcut-editor.png"))
         }
-        print("Rendered 52 SwiftUI snapshots: \(directory.path)")
+        print("Rendered 58 SwiftUI snapshots: \(directory.path)")
     }
 
     @MainActor private static func render<V: View>(_ view: V, size: NSSize?, scheme: ColorScheme, to url: URL) throws {
